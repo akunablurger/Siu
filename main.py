@@ -1,90 +1,93 @@
 import os
-import time
+from urllib.parse import urlparse
+
 from playwright.sync_api import sync_playwright
 
-def run():
-    # 1. Ambil data 1 akun dari matrix job GitHub Actions saat ini
-    account_str = os.getenv("CURRENT_ACCOUNT", "")
-    
-    # 2. Ambil data URL target yang berisi baris-baris (enter ke bawah) dari secret
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _target_urls(raw: str) -> list[str]:
+    urls = []
+    for line in raw.splitlines():
+        url = line.strip()
+        parsed = urlparse(url)
+        if not url:
+            continue
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"URL target tidak valid: {url}")
+        urls.append(url)
+    return urls
+
+
+def run() -> None:
+    account_str = os.getenv("CURRENT_ACCOUNT", "").strip()
     urls_raw = os.getenv("AI_STUDIO_URLS_SECRET", "")
 
     if not account_str or ":" not in account_str:
-        print("[ERROR] Akun matrix tidak valid atau kosong!")
-        return
+        raise ValueError("CURRENT_ACCOUNT harus berformat email:password")
 
     email, password = account_str.split(":", 1)
     email = email.strip()
     password = password.strip()
+    if not email or not password:
+        raise ValueError("Email atau password kosong")
 
-    # Parsing URL (pisahkan berdasarkan baris / enter)
-    target_urls = [url.strip() for url in urls_raw.strip().split("\n") if url.strip()]
-
+    target_urls = _target_urls(urls_raw)
     if not target_urls:
-        print("[ERROR] Tidak ada URL ditemukan di AI_STUDIO_URLS_SECRET!")
-        return
+        raise ValueError("AI_STUDIO_URLS_SECRET tidak berisi URL")
 
-    print(f"\n================================")
-    print(f"[PROSES MATRIX] Memproses Akun: {email}")
-    print(f"[INFO] Total Target URL yang akan dibuka: {len(target_urls)}")
-    print(f"================================")
+    headless = _env_bool("HEADLESS", default=True)
+    print(f"[INFO] Memproses akun: {email}")
+    print(f"[INFO] Total URL target: {len(target_urls)}")
+    print(f"[INFO] Playwright headless: {headless}")
 
-    with sync_playwright() as p:
-        # Jalankan browser (headless=False aman untuk debugging, di CI/CD github runner bisa berjalan)
-        browser = p.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--start-maximized"
-            ]
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
         )
-
-        # Buat context terisolasi khusus untuk akun ini (cookies aman tidak tercampur)
         context = browser.new_context(viewport={"width": 1280, "height": 800})
-        
-        # Buka tab pertama untuk proses login Gmail
-        page_login = context.new_page()
-
         try:
-            print(f"[{email}] Membuka halaman login Google...")
-            page_login.goto("https://accounts.google.com/", timeout=60000)
-
-            # Input Email
-            print(f"[{email}] Mengisi email...")
-            page_login.wait_for_selector('input[type="email"]', timeout=10000)
-            page_login.fill('input[type="email"]', email)
-            page_login.click('#identifierNext')
-
-            # Input Password
-            print(f"[{email}] Menunggu form password...")
-            page_login.wait_for_selector('input[type="password"]', timeout=15000)
-            time.sleep(2) # Jeda stabilisasi animasi
-            
-            print(f"[{email}] Mengisi password...")
-            page_login.fill('input[type="password"]', password)
-            page_login.click('#passwordNext')
-
-            print(f"[{email}] Menunggu proses login selesai...")
-            time.sleep(8) # Jeda sinkronisasi akun
-
-        except Exception as e:
-            print(f"[{email}] Kendala saat login otomatis: {e}")
-            print(f"[{email}] Melanjutkan proses buka tab target...")
-
-        # Tutup tab login agar bersih
-        try:
-            page_login.close()
-        except:
-            pass
-
-        # Membuka semua URL target (berdasarkan baris secret) ke tab-tab baru secara berurutan
-        for idx, url in enumerate(target_urls, start=1):
-            new_page = context.new_page()
+            login_page = context.new_page()
             try:
-                print(f"[{email}] Membuka Tab {idx} -> {url}")
-                new_page.goto(url, timeout=60000)
-            except Exception as ex:
-                print(f"[{email}] Gagal membuka tab {idx} ({url}): {ex}")
-            time.
+                print(f"[{email}] Membuka halaman login Google...")
+                login_page.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=60000)
+                login_page.locator('input[type="email"]').wait_for(timeout=15000)
+                login_page.locator('input[type="email"]').fill(email)
+                login_page.locator("#identifierNext").click()
+                login_page.locator('input[type="password"]').wait_for(timeout=15000)
+                login_page.locator('input[type="password"]').fill(password)
+                login_page.locator("#passwordNext").click()
+                login_page.wait_for_timeout(8000)
+
+                if "challenge" in login_page.url or "signin" in login_page.url:
+                    raise RuntimeError(
+                        "Login Google belum selesai; kemungkinan 2FA, CAPTCHA, atau security challenge."
+                    )
+                print(f"[{email}] Login selesai: {login_page.url}")
+            finally:
+                login_page.close()
+
+            for index, url in enumerate(target_urls, start=1):
+                page = context.new_page()
+                try:
+                    print(f"[{email}] Membuka tab {index}/{len(target_urls)} -> {url}")
+                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                finally:
+                    # Tab dibiarkan terbuka sampai proses selesai pada mode interaktif.
+                    # Pada CI, tutup tab setelah navigasi agar job tidak menggantung.
+                    if headless:
+                        page.close()
+
+        finally:
+            context.close()
+            browser.close()
+
+
+if __name__ == "__main__":
+    run()
