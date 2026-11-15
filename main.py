@@ -3,30 +3,31 @@ import time
 from playwright.sync_api import sync_playwright
 
 def run():
-    # Menerima data 1 akun (format: email:password) dari matrix job
-    account_str = os.getenv("CURRENT_ACCOUNT", "")
-    # Menerima 5 URL target yang dipisahkan oleh tanda koma (,)
-    targets_str = os.getenv("TARGET_URLS", "")
+    # Mengambil data dari 2 secret (berisi baris-baris teks dengan enter)
+    accounts_raw = os.getenv("ACCOUNTS_SECRET", "")
+    urls_raw = os.getenv("AI_STUDIO_URLS_SECRET", "")
 
-    if not account_str or ":" not in account_str:
-        print("[ERROR] Akun tidak valid atau kosong!")
+    # Parsing akun (pisahkan berdasarkan baris / enter)
+    accounts = []
+    for line in accounts_raw.strip().split("\n"):
+        line = line.strip()
+        if line and ":" in line:
+            email, password = line.split(":", 1)
+            accounts.append({"email": email.strip(), "password": password.strip()})
+
+    # Parsing URL (pisahkan berdasarkan baris / enter)
+    target_urls = [url.strip() for url in urls_raw.strip().split("\n") if url.strip()]
+
+    if not accounts:
+        print("[ERROR] Tidak ada akun ditemukan di ACCOUNTS_SECRET!")
         return
-
-    email, password = account_str.split(":", 1)
-    email = email.strip()
-    password = password.strip()
-
-    # Ubah string URL berpisah koma menjadi list Python
-    target_urls = [url.strip() for url in targets_str.split(",") if url.strip()]
 
     if not target_urls:
-        print("[ERROR] Target URL kosong!")
+        print("[ERROR] Tidak ada URL ditemukan di AI_STUDIO_URLS_SECRET!")
         return
 
-    print(f"\n================================")
-    print(f"[PROSES] Memproses Akun: {email}")
-    print(f"[INFO] Jumlah Target URL: {len(target_urls)}")
-    print(f"================================")
+    print(f"[INFO] Total akun dimuat: {len(accounts)}")
+    print(f"[INFO] Total URL target dimuat: {len(target_urls)}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -39,48 +40,41 @@ def run():
             ]
         )
 
-        # Buat context terisolasi untuk akun ini
-        context = browser.new_context(viewport={"width": 1280, "height": 800})
-        
-        # 1. Tab Login Gmail
-        page_login = context.new_page()
+        # Melakukan looping untuk setiap akun secara berurutan/paralel
+        for index, acc in enumerate(accounts, start=1):
+            email = acc["email"]
+            password = acc["password"]
 
-        try:
-            print(f"[{email}] Membuka halaman login Google...")
-            page_login.goto("https://accounts.google.com/", timeout=60000)
+            print(f"\n================================")
+            print(f"[PROSES] Akun ke-{index}: {email}")
+            print(f"================================")
 
-            # Input Email
-            print(f"[{email}] Mengisi email...")
-            page_login.wait_for_selector('input[type="email"]', timeout=10000)
-            page_login.fill('input[type="email"]', email)
-            page_login.click('#identifierNext')
-
-            # Input Password
-            print(f"[{email}] Menunggu form password...")
-            page_login.wait_for_selector('input[type="password"]', timeout=15000)
-            time.sleep(2)
+            # Buat context terisolasi untuk tiap akun agar cookies tidak tercampur
+            context = browser.new_context(viewport={"width": 1280, "height": 800})
             
-            print(f"[{email}] Mengisi password...")
-            page_login.fill('input[type="password"]', password)
-            page_login.click('#passwordNext')
+            # 1. Tab Login Gmail
+            page_login = context.new_page()
 
-            print(f"[{email}] Menunggu proses login selesai...")
-            time.sleep(8) 
-
-        except Exception as e:
-            print(f"[{email}] Kendala saat login otomatis: {e}")
-
-        # Tutup tab login
-        page_login.close()
-
-        # 2. Membuka 5 Tab untuk 5 URL AI Studio yang berbeda secara paralel
-        for idx, url in enumerate(target_urls, start=1):
-            new_page = context.new_page()
             try:
-                print(f"[{email}] Membuka Tab {idx} -> {url}")
-                new_page.goto(url, timeout=60000)
-            except Exception as ex:
-                print(f"[{email}] Gagal membuka tab {idx} ({url}): {ex}")
-            time.sleep(1)
+                print(f"[{email}] Membuka halaman login Google...")
+                page_login.goto("https://accounts.google.com/", timeout=60000)
 
-        print(f"[{email}] Semua tab berhasil di
+                # Input Email
+                print(f"[{email}] Mengisi email...")
+                page_login.wait_for_selector('input[type="email"]', timeout=10000)
+                page_login.fill('input[type="email"]', email)
+                page_login.click('#identifierNext')
+
+                # Input Password
+                print(f"[{email}] Menunggu form password...")
+                page_login.wait_for_selector('input[type="password"]', timeout=15000)
+                time.sleep(2)
+                
+                print(f"[{email}] Mengisi password...")
+                page_login.fill('input[type="password"]', password)
+                page_login.click('#passwordNext')
+
+                print(f"[{email}] Menunggu proses login selesai...")
+                time.sleep(8) 
+
+            except Exception as e:
